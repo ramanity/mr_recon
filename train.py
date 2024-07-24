@@ -1,4 +1,4 @@
-# modified from ArSSR github repo
+# Modified from ArSSR GitHub repo
 
 import data
 import torch
@@ -7,140 +7,162 @@ import argparse
 import time
 from torch.utils.tensorboard import SummaryWriter
 
-if __name__ == '__main__':
+def train_epoch(model, loader, optimizer, loss_fun, device, epoch, total_epochs):
+    """
+    Train the model for one epoch.
 
+    Parameters
+    ----------
+    model : nn.Module
+        The model to train.
+    loader : DataLoader
+        The DataLoader for training data.
+    optimizer : torch.optim.Optimizer
+        The optimizer for updating the model parameters.
+    loss_fun : nn.Module
+        The loss function.
+    device : torch.device
+        The device to run the model on.
+    epoch : int
+        The current epoch number.
+    total_epochs : int
+        The total number of epochs for training.
+
+    Returns
+    -------
+    float
+        The average training loss for the epoch.
+    """
+    model.train()
+    total_loss = 0
+    for i, (img_lr, xyz_hr, img_hr) in enumerate(loader):
+        img_lr = img_lr.unsqueeze(1).to(device).float()  # N×1×h×w×d
+        img_hr = img_hr.to(device).float().view(img_lr.size(0), -1).unsqueeze(-1)  # N×K×1
+        xyz_hr = xyz_hr.view(img_lr.size(0), -1, 3).to(device).float()  # N×K×3
+
+        optimizer.zero_grad()
+        img_pre = model(img_lr, xyz_hr)  # N×K×1
+        loss = loss_fun(img_pre, img_hr)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        current_lr = optimizer.state_dict()['param_groups'][0]['lr']
+        print(f'(TRAIN) Epoch[{epoch}/{total_epochs}], Step[{i + 1}/{len(loader)}], Lr:{current_lr}, Loss:{loss.item():.10f}')
+    
+    return total_loss / len(loader)
+
+def validate_epoch(model, loader, loss_fun, device):
+    """
+    Validate the model for one epoch.
+
+    Parameters
+    ----------
+    model : nn.Module
+        The model to validate.
+    loader : DataLoader
+        The DataLoader for validation data.
+    loss_fun : nn.Module
+        The loss function.
+    device : torch.device
+        The device to run the model on.
+
+    Returns
+    -------
+    float
+        The average validation loss for the epoch.
+    """
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for i, (img_lr, xyz_hr, img_hr) in enumerate(loader):
+            img_lr = img_lr.unsqueeze(1).to(device).float()  # N×1×h×w×d
+            xyz_hr = xyz_hr.view(1, -1, 3).to(device).float()  # N×Q×3 (Q=H×W×D)
+            img_hr = img_hr.to(device).float().view(1, -1).unsqueeze(-1)  # N×Q×1
+
+            img_pre = model(img_lr, xyz_hr)  # N×Q×1
+            loss = loss_fun(img_pre, img_hr)
+            total_loss += loss.item()
+    
+    return total_loss / len(loader)
+
+def main():
     writer = SummaryWriter('./log')
     parser = argparse.ArgumentParser()
 
     parser.add_argument('-decoder_depth', type=int, default=8, dest='decoder_depth',
-                        help='the depth of the decoder network (default=8).')
+                        help='The depth of the decoder network (default=8).')
     parser.add_argument('-decoder_width', type=int, default=256, dest='decoder_width',
-                        help='the width of the decoder network (default=256).')
+                        help='The width of the decoder network (default=256).')
     parser.add_argument('-feature_dim', type=int, default=128, dest='feature_dim',
-                        help='the dimension size of the feature vector (default=128)')
+                        help='The dimension size of the feature vector (default=128).')
     parser.add_argument('-hr_data_train', type=str, default='./data/train', dest='hr_data_train',
-                        help='the file path of HR patches for training')
+                        help='The file path of HR patches for training.')
     parser.add_argument('-hr_data_val', type=str, default='./data/val', dest='hr_data_val',
-                        help='the file path of HR patches for validation')
+                        help='The file path of HR patches for validation.')
     parser.add_argument('-lr', type=float, default=1e-4, dest='lr',
-                        help='the initial learning rate')
+                        help='The initial learning rate.')
     parser.add_argument('-lr_decay_epoch', type=int, default=200, dest='lr_decay_epoch',
-                        help='learning rate multiply by 0.5 per lr_decay_epoch .')
+                        help='Learning rate multiply by 0.5 per lr_decay_epoch.')
     parser.add_argument('-epoch', type=int, default=100, dest='epoch',
-                        help='the total number of epochs for training')
+                        help='The total number of epochs for training.')
     parser.add_argument('-summary_epoch', type=int, default=10, dest='summary_epoch',
-                        help='the current model will be saved per summary_epoch')
+                        help='The current model will be saved per summary_epoch.')
     parser.add_argument('-bs', type=int, default=20, dest='batch_size',
-                        help='the number of LR-HR patch pairs (i.e., N in Equ. 3)')
+                        help='The number of LR-HR patch pairs (i.e., N in Equ. 3).')
     parser.add_argument('-ss', type=int, default=8000, dest='sample_size',
-                        help='the number of sampled voxel coordinates (i.e., K in Equ. 3)')
+                        help='The number of sampled voxel coordinates (i.e., K in Equ. 3).')
     parser.add_argument('-gpu', type=int, default=0, dest='gpu',
-                        help='the number of GPU')
+                        help='The number of GPU.')
 
     args = parser.parse_args()
-    encoder_name = args.encoder_name
-    decoder_depth = args.decoder_depth
-    decoder_width = args.decoder_width
-    feature_dim = args.feature_dim
-    hr_data_train = args.hr_data_train
-    hr_data_val = args.hr_data_val
-    lr = args.lr
-    lr_decay_epoch = args.lr_decay_epoch
-    epoch = args.epoch
-    summary_epoch = args.summary_epoch
-    batch_size = args.batch_size
-    sample_size = args.sample_size
-    gpu = args.gpu
-
 
     print('Parameter Settings')
-    print('')
     print('------------File------------')
-    print('hr_data_train: {}'.format(hr_data_train))
-    print('hr_data_val: {}'.format(hr_data_val))
+    print(f'hr_data_train: {args.hr_data_train}')
+    print(f'hr_data_val: {args.hr_data_val}')
     print('------------Train-----------')
-    print('lr: {}'.format(lr))
-    print('batch_size_train: {}'.format(batch_size))
-    print('sample_size: {}'.format(sample_size))
-    print('gpu: {}'.format(gpu))
-    print('epochs: {}'.format(epoch))
-    print('summary_epoch: {}'.format(summary_epoch))
-    print('lr_decay_epoch: {}'.format(lr_decay_epoch))
+    print(f'lr: {args.lr}')
+    print(f'batch_size_train: {args.batch_size}')
+    print(f'sample_size: {args.sample_size}')
+    print(f'gpu: {args.gpu}')
+    print(f'epochs: {args.epoch}')
+    print(f'summary_epoch: {args.summary_epoch}')
+    print(f'lr_decay_epoch: {args.lr_decay_epoch}')
     print('------------Model-----------')
-    print('encoder_name : {}'.format(encoder_name))
-    print('decoder feature_dim: {}'.format(feature_dim))
-    print('decoder depth: {}'.format(decoder_depth))
-    print('decoder width: {}'.format(decoder_width))
-    for i in range(5):
-        print(i + 1, end="s,")
-        time.sleep(1)
+    print(f'decoder feature_dim: {args.feature_dim}')
+    print(f'decoder depth: {args.decoder_depth}')
+    print(f'decoder width: {args.decoder_width}')
+    
+    time.sleep(5)
 
+    train_loader = data.loader_train(in_path_hr=args.hr_data_train, batch_size=args.batch_size,
+                                     sample_size=args.sample_size, is_train=True)
+    val_loader = data.loader_train(in_path_hr=args.hr_data_val, batch_size=1,
+                                   sample_size=args.sample_size, is_train=False)
 
-    train_loader = data.loader_train(in_path_hr=hr_data_train, batch_size=batch_size,
-                                     sample_size=sample_size, is_train=True)
-    val_loader = data.loader_train(in_path_hr=hr_data_val, batch_size=1,
-                                   sample_size=sample_size, is_train=False)
-
-
-    DEVICE = torch.device('cuda:0'if torch.cuda.is_available() else 'cpu')
-    mrirecon_model = model.mrirecon(encoder_name=encoder_name, feature_dim=feature_dim,
-                        decoder_depth=int(decoder_depth / 2), decoder_width=decoder_width).to(DEVICE)
+    device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
+    mrirecon_model = model.mrirecon(feature_dim=args.feature_dim,
+                                    decoder_depth=args.decoder_depth // 2,
+                                    decoder_width=args.decoder_width).to(device)
     loss_fun = torch.nn.L1Loss()
-    optimizer = torch.optim.Adam(params=mrirecon_model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(params=mrirecon_model.parameters(), lr=args.lr)
 
+    for e in range(args.epoch):
+        loss_train = train_epoch(mrirecon_model, train_loader, optimizer, loss_fun, device, e + 1, args.epoch)
+        writer.add_scalar('MES_train', loss_train, e + 1)
 
-    for e in range(epoch):
-        mrirecon_model.train()
-        loss_train = 0
-        for i, (img_lr, xyz_hr, img_hr) in enumerate(train_loader):
-            # forward
-            img_lr = img_lr.unsqueeze(1).to(DEVICE).float()  # N×1×h×w×d
-            img_hr = img_hr.to(DEVICE).float().view(batch_size, -1).unsqueeze(-1)  # N×K×1 (K Equ. 3)
-            xyz_hr = xyz_hr.view(batch_size, -1, 3).to(DEVICE).float()  # N×K×3
-            img_pre = mrirecon_model(img_lr, xyz_hr)  # N×K×1
-            loss = loss_fun(img_pre, img_hr)
-            # backward
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            # record and print loss
-            loss_train += loss.item()
-            current_lr = optimizer.state_dict()['param_groups'][0]['lr']
-            print('(TRAIN) Epoch[{}/{}], Steps[{}/{}], Lr:{}, Loss:{:.10f}'.format(e + 1,
-                                                                                   epoch,
-                                                                                   i + 1,
-                                                                                   len(train_loader),
-                                                                                   current_lr,
-                                                                                   loss.item()))
+        loss_val = validate_epoch(mrirecon_model, val_loader, loss_fun, device)
+        writer.add_scalar('MES_val', loss_val, e + 1)
 
-        writer.add_scalar('MES_train', loss_train / len(train_loader), e + 1)
-        # release memory
-        img_lr = None
-        img_hr = None
-        xyz_hr = None
-        img_pre = None
+        if (e + 1) % args.summary_epoch == 0:
+            torch.save(mrirecon_model.state_dict(), f'model3/model_param_{e + 1}.pkl')
 
-        mrirecon_model.eval()
-        with torch.no_grad():
-            loss_val = 0
-            for i, (img_lr, xyz_hr, img_hr) in enumerate(val_loader):
-                img_lr = img_lr.unsqueeze(1).to(DEVICE).float()  # N×1×h×w×d
-                xyz_hr = xyz_hr.view(1, -1, 3).to(DEVICE).float()  # N×Q×3 (Q=H×W×D)
-                H, W, D = img_hr.shape[-3:]
-                img_hr = img_hr.to(DEVICE).float().view(1, -1).unsqueeze(-1)  # N×Q×1 (Q=H×W×D)
-                img_pre = mrirecon_model(img_lr, xyz_hr)  # N×Q×1 (Q=H×W×D)
-                loss_val += loss_fun(img_hr, img_pre)
-                if (e + 1) % summary_epoch == 0:
-                    torch.save(mrirecon_model.state_dict(), 'model3/model_param_{}.pkl'.format(e + 1))
-
-        writer.add_scalar('MES_val', loss_val / len(val_loader), e + 1)
-        img_lr = None
-        img_hr = None
-        xyz_hr = None
-        img_pre = None
-
-        if (e + 1) % lr_decay_epoch == 0:
+        if (e + 1) % args.lr_decay_epoch == 0:
             for param_group in optimizer.param_groups:
                 param_group['lr'] *= 0.5
 
     writer.flush()
+
+if __name__ == '__main__':
+    main()
